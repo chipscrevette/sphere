@@ -141,3 +141,24 @@ async def test_evolution_meme_produit(stac):
 async def test_zone_trop_grande(stac):
     r = await appel("occupation_sol", annee=2020, bbox=[100.0, 25.0, 110.0, 35.0])
     assert "300 km" in r["erreur"]
+
+
+async def test_signature_par_compte(monkeypatch):
+    from geosphere_mcp import satellite as sat
+    vus = []
+
+    async def faux(url, params=None, *, source):
+        vus.append(url)
+        return {"token": "sv=1&sig=abc"}
+
+    monkeypatch.setattr(sat, "get_json", faux)
+    sat._jetons.clear()
+    h = await sat._signer("cop-dem-glo-30", "https://elevationeuwest.blob.core.windows.net/copernicus-dem/COP30_hh/a.tif")
+    assert h.endswith("?sv=1&sig=abc") and vus[-1].endswith("/token/elevationeuwest/copernicus-dem")
+    assert await sat._signer("x", h) == h  # déjà signé
+    assert await sat._signer("x", "https://exemple.org/a.tif") == "https://exemple.org/a.tif"
+
+
+def test_annee_modis_depuis_identifiant():
+    from geosphere_mcp.satellite import _annee_item
+    assert _annee_item({"id": "MCD12Q1.A2010001.h27v05.061.2022169161028", "properties": {"datetime": None}}) == "2010"

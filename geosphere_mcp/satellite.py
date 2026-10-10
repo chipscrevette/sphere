@@ -16,8 +16,10 @@ import base64
 import copy
 import datetime as dt
 import math
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlparse
 
 import numpy as np
 
@@ -91,19 +93,24 @@ def _grille(bbox: list[float], res_native_m: float, taille_max: int):
 
 # --- Catalogue STAC ------------------------------------------------------------------------------
 
-async def _jeton(collection: str) -> str:
-    hit = _jetons.get(collection)
+async def _jeton(compte: str, conteneur: str) -> str:
+    """Jeton SAS anonyme par compte de stockage et conteneur : marche pour toute collection, même quand
+    ses fichiers sont hors du compte principal (cop-dem, MODIS...)."""
+    cle = f"{compte}/{conteneur}"
+    hit = _jetons.get(cle)
     if hit and hit[0] > time.time():
         return hit[1]
-    r = await get_json(f"{SAS}/{collection}", source="Planetary Computer (jeton d'accès)")
-    _jetons[collection] = (time.time() + 40 * 60, r["token"])
+    r = await get_json(f"{SAS}/{cle}", source="Planetary Computer (jeton d'accès)")
+    _jetons[cle] = (time.time() + 40 * 60, r["token"])
     return r["token"]
 
 
 async def _signer(collection: str, href: str) -> str:
-    if "blob.core.windows.net" not in href:
+    u = urlparse(href)
+    if not u.netloc.endswith(".blob.core.windows.net") or "sig=" in u.query:
         return href
-    return f"{href}{'&' if '?' in href else '?'}{await _jeton(collection)}"
+    conteneur = u.path.lstrip("/").split("/")[0]
+    return f"{href}{'&' if u.query else '?'}{await _jeton(u.netloc.split('.')[0], conteneur)}"
 
 
 async def _chercher(collection: str, bbox: list[float], debut: str, fin: str, nuages_max: float | None = None,
@@ -388,11 +395,33 @@ def produit_auto(annee: int) -> str:
                       "Pour 1984–1991 : composite_satellite(classer=True), ou classification supervisée dans Géosphère.")
 
 
+def _annee_item(it: dict) -> str:
+    p = it.get("properties", {})
+    d = (p.get("start_datetime") or p.get("datetime") or "")[:4]
+    if d:
+        return d
+    m = re.search(r"\.A(\d{4})\d{3}", it.get("id", ""))  # identifiants MODIS : MCD12Q1.A2010001.h27v05...
+    return m.group(1) if m else ""
+
+
 def _items_annee(items: list[dict], annee: int) -> list[dict]:
-    def an(it):
-        p = it["properties"]
-        return (p.get("start_datetime") or p.get("datetime") or "")[:4]
-    return [it for it in items if an(it) == str(annee)]
+    return [it for it in items if _annee_item(it) == str(annee)]
+
+
+async def _tuiles(collection: str, zone: list[float], annee: int) -> list[dict]:
+    """Tuiles d'une année ; si la recherche datée ne renvoie rien (dates mal renseignées, MODIS), recherche sans date
+    puis tri par année. L'erreur liste alors les années trouvées sur la zone."""
+    items = await _chercher(collection, zone, f"{annee}-01-01", f"{annee}-12-31", limite=50)
+    if items:
+        return _items_annee(items, annee) or items
+    corps = {"collections": [collection], "bbox": zone, "limit": 250}
+    tous = (await post_json(f"{STAC}/search", corps, source=f"STAC {collection}")).get("features", [])
+    items = _items_annee(tous, annee)
+    if not items:
+        dispo = sorted({_annee_item(it) for it in tous} - {""})
+        raise SourceError(f"Aucune tuile {collection} {annee} sur cette zone"
+                          + (f" (années trouvées : {', '.join(dispo)})" if dispo else " (aucune tuile sur la zone, toutes années)"))
+    return items
 
 
 def _mosaique_sync(hrefs: list[str], crs, transform, w: int, h: int, res: float, ignorer: tuple[int, ...]) -> np.ndarray:
@@ -413,10 +442,7 @@ async def occupation_sol(bbox: list[float] | None, lieu: str | None, rayon_km: f
     a0, a1 = p["annees"]
     if not a0 <= annee <= a1:
         raise SourceError(f"{produit} couvre {a0}–{a1} seulement")
-    items = await _chercher(p["collection"], zone, f"{annee}-01-01", f"{annee}-12-31", limite=50)
-    items = _items_annee(items, annee) or items
-    if not items:
-        raise SourceError(f"Aucune tuile {produit} {annee} sur cette zone")
+    items = await _tuiles(p["collection"], zone, annee)
     hrefs = []
     for it in items:
         asset = it["assets"].get(p["asset"]) or next(v for v in it["assets"].values() if "image/tiff" in v.get("type", ""))
