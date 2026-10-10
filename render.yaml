@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: geosphere-mcp
+    runtime: python
+    plan: free
+    region: frankfurt
+    buildCommand: pip install .
+    startCommand: python -m geosphere_mcp --http
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
