@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import io
 import time
 from typing import Any
@@ -65,3 +66,19 @@ async def get_csv(url: str, *, source: str) -> list[dict[str, str]]:
     rows = list(csv.DictReader(io.StringIO(text)))
     _cache[k] = (time.time() + _TTL, rows)
     return rows
+
+
+async def post_json(url: str, body: dict, *, source: str) -> Any:
+    k = url + "#" + json.dumps(body, sort_keys=True)
+    hit = _cache.get(k)
+    if hit and hit[0] > time.time():
+        return hit[1]
+    try:
+        r = await client().post(url, json=body)
+    except httpx.HTTPError as e:
+        raise SourceError(f"{source} injoignable ({type(e).__name__})") from e
+    if r.status_code >= 400:
+        raise SourceError(f"{source} : erreur {r.status_code} {r.text[:200]}")
+    data = r.json()
+    _cache[k] = (time.time() + _TTL, data)
+    return data

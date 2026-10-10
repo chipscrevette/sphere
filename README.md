@@ -2,7 +2,7 @@
 
 Serveur MCP qui donne à Géosphère (et à Claude Desktop, Claude Code ou claude.ai) un accès en direct aux données SIG françaises. Chaque outil renvoie un résumé compact, une ligne `etape` à afficher dans le fil du chatbot, et la `source` à citer.
 
-## Outils (v0.2, sans base de données ni clé)
+## Outils (v0.3, sans base de données ni clé)
 
 | Outil | Ce qu'il renvoie | Source |
 | --- | --- | --- |
@@ -20,6 +20,17 @@ Serveur MCP qui donne à Géosphère (et à Claude Desktop, Claude Code ou claud
 | `entites_ign` | **Couche carte** : objets d'une couche WFS IGN autour d'un point en GeoJSON (bâtiments, routes, RPG...) | Géoplateforme IGN |
 
 Les outils « couche carte » renvoient un résumé court (`etape`, `couche`, `pagination`, `resume`) et une clé `geojson`. Le chatbot charge `geojson` comme couche puis la retire avant de passer le résultat au modèle : la carte reçoit les entités, le modèle seulement le résumé. Page par défaut : 1 000 ventes (~340 Ko) ou 500 objets IGN ; `offset` = `pagination.offset_suivant` pour la suite.
+
+### Monde : satellite et occupation du sol (Microsoft Planetary Computer, sans clé)
+
+| Outil | Ce qu'il renvoie |
+| --- | --- |
+| `composite_satellite` | Image sans nuages d'une année (Landsat 30 m dès 1984, Sentinel-2 10 m dès 2017) : nuages et ombres masqués pixel par pixel, médiane des scènes, fenêtre élargie automatiquement (saison, puis année, puis ±1 an) tant que la zone n'est pas couverte à 95 % ; % sans nuage, % indicatifs eau / forêt / végétation basse / bâti-sol nu ; GeoTIFF 6 bandes |
+| `occupation_sol` | % d'occupation du sol depuis des cartes déjà classées : IO/Esri 10 m (2017–2023), ESA CCI 300 m (1992–2020), MODIS 500 m (2001+), ESA WorldCover (2020–2021) ; GeoTIFF classé avec légende |
+| `evolution_occupation_sol` | Tableau année par année et variation en points, avec un seul produit quand c'est possible |
+| `catalogue_satellite` / `rechercher_scenes` / `extraire_raster` | N'importe quelle collection du catalogue (MNT, climat, population...) : recherche, scènes disponibles, extraction d'un raster sur une zone |
+
+Zone : `bbox` WGS84 ou `lieu` (géocodage OpenStreetMap) + `rayon_km`, 300 km de côté au maximum. Les rasters sont lus sur les aperçus des COG à la résolution utile, puis renvoyés en GeoTIFF base64 (clé `geotiff_base64`, métadonnées dans `raster`) : le chatbot le charge en couche et le retire avant le modèle.
 
 La ressource `geosphere://catalogue` liste les sources branchées et celles à venir (Filosofi, recensement détaillé, SIRENE, SQL PostGIS).
 

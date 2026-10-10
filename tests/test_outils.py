@@ -246,8 +246,19 @@ async def test_entites_ign():
     ("interroger_couche_ign", {"couche": "BDTOPO_V3:troncon_de_route", "lon": 4.88, "lat": 45.77}),
     ("ventes_carte", {"code_insee": "64102", "type_bien": "Maison"}),
     ("entites_ign", {"couche": "BDTOPO_V3:batiment", "lon": 4.88, "lat": 45.77, "rayon_m": 200, "champ_suggere": "hauteur"}),
+    ("catalogue_satellite", {"recherche": "land cover"}),
+    ("rechercher_scenes", {"collection": "landsat-c2-l2", "debut": "1995-01-01", "fin": "1995-12-31", "lieu": "Three Gorges Dam", "rayon_km": 10, "nuages_max": 40}),
+    ("composite_satellite", {"annee": 1995, "lieu": "Three Gorges Dam", "rayon_km": 8, "taille_max": 256}),
+    ("composite_satellite", {"annee": 2023, "lieu": "Three Gorges Dam", "rayon_km": 8, "taille_max": 256}),
+    ("occupation_sol", {"annee": 2020, "lieu": "Three Gorges Dam", "rayon_km": 10}),
+    ("occupation_sol", {"annee": 2010, "lieu": "Three Gorges Dam", "rayon_km": 10, "produit": "modis"}),
+    ("evolution_occupation_sol", {"annees": [1995, 2005, 2015], "lieu": "Three Gorges Dam", "rayon_km": 20}),
+    ("extraire_raster", {"collection": "cop-dem-glo-30", "asset": "data", "lieu": "Three Gorges Dam", "rayon_km": 10}),
 ])
 async def test_live(nom, args):
+    import time
+    t = time.time()
     r = await appel(nom, **args)
-    print(f"\n{nom}: {r['etape']}")
+    poids = len(json.dumps(r)) // 1024
+    print(f"\n{nom}: {r.get('etape')} · {time.time() - t:.1f} s · {poids} Ko · {r.get('avertissements') or r.get('avertissement') or ''}")
     assert "erreur" not in r, r.get("erreur")

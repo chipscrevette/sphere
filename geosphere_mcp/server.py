@@ -16,17 +16,19 @@ from pydantic import Field
 
 from mcp.server.mcpserver import MCPServer
 
-from . import batiments as bati, foncier, ign, reglementaire as regl, territoire as terr
+from . import batiments as bati, foncier, ign, reglementaire as regl, satellite as sat, territoire as terr
 from .http import SourceError
 
-INSTRUCTIONS = """Données SIG françaises en direct (IGN, INSEE/COG, BAN, cadastre, DVF, BDNB, DPE ADEME, GPU, Géorisques).
-Commencer par resoudre_territoire ou geocoder pour obtenir code INSEE et coordonnées, puis appeler l'outil métier.
+INSTRUCTIONS = """Données SIG en direct : France (IGN, INSEE/COG, BAN, cadastre, DVF, BDNB, DPE ADEME, GPU, Géorisques) et monde (satellite, occupation du sol).
+En France, commencer par resoudre_territoire ou geocoder pour obtenir code INSEE et coordonnées, puis appeler l'outil métier.
 Chaque réponse porte `etape` (ligne à afficher dans le fil d'étapes) et `source` (à citer avec le millésime).
 Les résultats sont déjà agrégés : ne pas redemander le détail brut sauf besoin explicite.
 Pour AFFICHER des entités sur la carte (ventes une par une, bâtiments, parcelles agricoles…), utiliser ventes_carte ou entites_ign :
-leur clé `geojson` est une couche à charger telle quelle ; ne jamais la recopier dans la réponse."""
+leur clé `geojson` est une couche à charger telle quelle ; ne jamais la recopier dans la réponse.
+Hors de France ou en imagerie : composite_satellite (images sans nuages), occupation_sol et evolution_occupation_sol (% eau, forêt, bâti…),
+extraire_raster pour tout autre raster mondial. Leur clé `geotiff_base64` est un raster à charger tel quel ; ne jamais la recopier."""
 
-mcp = MCPServer("geosphere", title="Géosphère · données SIG", instructions=INSTRUCTIONS, version="0.2.0")
+mcp = MCPServer("geosphere", title="Géosphère · données SIG", instructions=INSTRUCTIONS, version="0.3.0")
 
 Lon = Annotated[float, Field(description="Longitude WGS84", ge=-180, le=180)]
 Lat = Annotated[float, Field(description="Latitude WGS84", ge=-90, le=90)]
@@ -178,6 +180,101 @@ async def entites_ign(
     return await _sur(ign.entites(couche, lon, lat, rayon_m, champs, champ_suggere, limite, offset))
 
 
+Bbox = Annotated[list[float] | None, Field(description="Emprise WGS84 [lon_min, lat_min, lon_max, lat_max] (300 km de côté max)", min_length=4, max_length=4)]
+Lieu = Annotated[str | None, Field(description="Lieu dans le monde, à défaut de bbox (géocodage OpenStreetMap), ex. « Barrage des Trois-Gorges »")]
+RayonKm = Annotated[float, Field(description="Demi-côté de la zone autour du lieu, en km", ge=0.5, le=150)]
+TailleMax = Annotated[int, Field(description="Côté max du raster renvoyé, en pixels (la résolution s'adapte)", ge=64, le=1024)]
+
+
+@mcp.tool()
+async def catalogue_satellite(recherche: Annotated[str, Field(description="Mots-clés, ex. 'landsat', 'elevation', 'land cover', 'population'")]) -> dict:
+    """Cherche une collection de données raster mondiales (satellite, MNT, occupation du sol, climat…) dans le catalogue STAC public."""
+    return await _sur(sat.catalogue(recherche))
+
+
+@mcp.tool()
+async def rechercher_scenes(
+    collection: Annotated[str, Field(description="Id de collection STAC, ex. landsat-c2-l2, sentinel-2-l2a")],
+    debut: Annotated[str, Field(description="Date de début AAAA-MM-JJ")],
+    fin: Annotated[str, Field(description="Date de fin AAAA-MM-JJ")],
+    bbox: Bbox = None,
+    lieu: Lieu = None,
+    rayon_km: RayonKm = 15,
+    nuages_max: Annotated[float | None, Field(description="Couverture nuageuse max de la scène, en %", ge=0, le=100)] = None,
+) -> dict:
+    """Liste les scènes disponibles sur une zone et une période : nombre par année, scènes les moins nuageuses, assets."""
+    async def go():
+        zone, _ = await sat.emprise(bbox, lieu, rayon_km)
+        return await sat.scenes(collection, zone, debut, fin, nuages_max)
+    return await _sur(go())
+
+
+@mcp.tool(structured_output=False)  # GeoTIFF en base64 : une seule copie dans la réponse
+async def composite_satellite(
+    annee: Annotated[int, Field(description="Année visée", ge=1984, le=2100)],
+    bbox: Bbox = None,
+    lieu: Lieu = None,
+    rayon_km: RayonKm = 15,
+    capteur: Annotated[Literal["auto", "landsat", "sentinel-2"], Field(description="auto : Sentinel-2 (10 m) dès 2017, Landsat (30 m) avant")] = "auto",
+    mois_debut: Annotated[int, Field(ge=1, le=12)] = 5,
+    mois_fin: Annotated[int, Field(ge=1, le=12)] = 9,
+    max_scenes: Annotated[int, Field(ge=1, le=15)] = 8,
+    taille_max: TailleMax = 384,
+    classer: Annotated[bool, Field(description="Ajoute des % indicatifs eau / forêt / végétation basse / bâti-sol nu")] = True,
+    geotiff: Annotated[bool, Field(description="Renvoie le GeoTIFF 6 bandes (rouge, vert, bleu, pir, swir1, swir2) pour la carte")] = True,
+) -> dict:
+    """Image satellite SANS NUAGES d'une année sur une zone du monde : nuages et ombres masqués pixel par pixel,
+    médiane des meilleures scènes, fenêtre de dates élargie automatiquement si la zone reste nuageuse.
+    Le GeoTIFF (clé geotiff_base64) part sur la carte ; le modèle ne reçoit que le résumé."""
+    return await _sur(sat.composite(bbox, lieu, rayon_km, annee, capteur, mois_debut, mois_fin, max_scenes, taille_max, classer, geotiff))
+
+
+@mcp.tool(structured_output=False)  # GeoTIFF en base64 : une seule copie dans la réponse
+async def occupation_sol(
+    annee: Annotated[int, Field(description="Année (1992–2023 selon le produit)", ge=1992, le=2100)],
+    bbox: Bbox = None,
+    lieu: Lieu = None,
+    rayon_km: RayonKm = 15,
+    produit: Annotated[Literal["auto", "io-lulc", "esa-worldcover", "esa-cci", "modis"],
+                       Field(description="auto : IO/Esri 10 m (2017–2023), sinon ESA CCI 300 m (1992–2020), sinon MODIS 500 m")] = "auto",
+    taille_max: TailleMax = 768,
+    geotiff: bool = True,
+) -> dict:
+    """% d'occupation du sol (eau, forêt, cultures, bâti, sol nu…) d'une zone du monde, depuis des cartes déjà classées.
+    Le GeoTIFF classé (clé geotiff_base64, avec légende et couleurs) part sur la carte."""
+    return await _sur(sat.occupation_sol(bbox, lieu, rayon_km, annee, produit, taille_max, geotiff))
+
+
+@mcp.tool()
+async def evolution_occupation_sol(
+    annees: Annotated[list[int], Field(description="Années à comparer, ex. [1995, 2000, 2005, 2010, 2015, 2020]", min_length=2, max_length=12)],
+    bbox: Bbox = None,
+    lieu: Lieu = None,
+    rayon_km: RayonKm = 15,
+    produit: Annotated[Literal["auto", "io-lulc", "esa-cci", "modis"], Field(description="auto : un seul produit si possible (ESA CCI pour 1992–2020)")] = "auto",
+    taille_max: TailleMax = 512,
+) -> dict:
+    """Tableau de l'occupation du sol (%) année par année et variation en points entre la première et la dernière année."""
+    return await _sur(sat.evolution(bbox, lieu, rayon_km, annees, produit, taille_max))
+
+
+@mcp.tool(structured_output=False)  # GeoTIFF en base64 : une seule copie dans la réponse
+async def extraire_raster(
+    collection: Annotated[str, Field(description="Id de collection STAC, ex. cop-dem-glo-30 (altitude)")],
+    asset: Annotated[str, Field(description="Nom de l'asset, ex. data, B04, elevation")],
+    debut: Annotated[str, Field(description="AAAA-MM-JJ")] = "1900-01-01",
+    fin: Annotated[str, Field(description="AAAA-MM-JJ")] = "2100-12-31",
+    bbox: Bbox = None,
+    lieu: Lieu = None,
+    rayon_km: RayonKm = 15,
+    resolution_native_m: Annotated[float, Field(description="Résolution native de la donnée, en m", gt=0)] = 30,
+    taille_max: TailleMax = 512,
+) -> dict:
+    """Extrait n'importe quel raster du catalogue STAC sur une zone (mosaïque des tuiles, 1 bande) : MNT, population, climat…
+    Le GeoTIFF (clé geotiff_base64) part sur la carte ; le modèle reçoit min, médiane et max."""
+    return await _sur(sat.extraire(collection, asset, bbox, lieu, rayon_km, debut, fin, taille_max, resolution_native_m))
+
+
 CATALOGUE = {
     "live_sans_cle": {
         "Découpage administratif / COG": "resoudre_territoire",
@@ -190,6 +287,11 @@ CATALOGUE = {
         "Géoportail de l'Urbanisme": "urbanisme",
         "Géorisques": "risques",
         "Tout le WFS IGN (RPG, OCS GE, ADMIN EXPRESS...)": "lister_couches_ign, interroger_couche_ign, entites_ign (couche)",
+    },
+    "monde_satellite": {
+        "Landsat 4-9 (1984+, 30 m) et Sentinel-2 (2017+, 10 m), sans nuages": "composite_satellite",
+        "Occupation du sol ESA CCI, MODIS, IO/Esri, ESA WorldCover": "occupation_sol, evolution_occupation_sol",
+        "Tout le catalogue Planetary Computer (MNT, climat, population...)": "catalogue_satellite, rechercher_scenes, extraire_raster",
     },
     "a_venir": {
         "Carreaux Filosofi 200 m": "ingestion PostGIS (fichiers seulement)",
