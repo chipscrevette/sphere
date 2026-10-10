@@ -22,9 +22,11 @@ from .http import SourceError
 INSTRUCTIONS = """Données SIG françaises en direct (IGN, INSEE/COG, BAN, cadastre, DVF, BDNB, DPE ADEME, GPU, Géorisques).
 Commencer par resoudre_territoire ou geocoder pour obtenir code INSEE et coordonnées, puis appeler l'outil métier.
 Chaque réponse porte `etape` (ligne à afficher dans le fil d'étapes) et `source` (à citer avec le millésime).
-Les résultats sont déjà agrégés : ne pas redemander le détail brut sauf besoin explicite."""
+Les résultats sont déjà agrégés : ne pas redemander le détail brut sauf besoin explicite.
+Pour AFFICHER des entités sur la carte (ventes une par une, bâtiments, parcelles agricoles…), utiliser ventes_carte ou entites_ign :
+leur clé `geojson` est une couche à charger telle quelle ; ne jamais la recopier dans la réponse."""
 
-mcp = MCPServer("geosphere", title="Géosphère · données SIG", instructions=INSTRUCTIONS, version="0.1.0")
+mcp = MCPServer("geosphere", title="Géosphère · données SIG", instructions=INSTRUCTIONS, version="0.2.0")
 
 Lon = Annotated[float, Field(description="Longitude WGS84", ge=-180, le=180)]
 Lat = Annotated[float, Field(description="Latitude WGS84", ge=-90, le=90)]
@@ -136,18 +138,58 @@ async def interroger_couche_ign(
     return await _sur(ign.interroger_couche(couche, lon, lat, rayon_m, champs))
 
 
+Limite = Annotated[int, Field(description="Nombre max d'entités renvoyées (page)", ge=1, le=5000)]
+Offset = Annotated[int, Field(description="Décalage pour la page suivante (pagination.offset_suivant)", ge=0)]
+
+
+@mcp.tool()
+async def ventes_carte(
+    code_insee: CodeInsee,
+    type_bien: Annotated[Literal["Appartement", "Maison"] | None, Field(description="Filtrer sur un type de bien")] = None,
+    neuf: Annotated[bool, Field(description="Seulement les ventes en VEFA (neuf sur plan)")] = False,
+    annees: Annotated[int, Field(description="Nombre d'années en arrière", ge=1, le=6)] = 5,
+    prix_m2_min: float | None = None,
+    prix_m2_max: float | None = None,
+    lon: Lon | None = None,
+    lat: Lat | None = None,
+    rayon_m: Rayon = 500,
+    limite: Limite = 1000,
+    offset: Offset = 0,
+) -> dict:
+    """Ventes DVF une par une, en COUCHE CARTE (points GeoJSON) : prix, surface, prix_m2, date, VEFA, adresse, parcelle.
+    À utiliser pour afficher, classer (quantiles…) ou exporter des ventes. Le GeoJSON part sur la carte ;
+    le modèle ne reçoit que le résumé, la pagination et la liste des champs."""
+    return await _sur(foncier.ventes_carte(code_insee, type_bien, neuf, annees, prix_m2_min, prix_m2_max, lon, lat, rayon_m, limite, offset))
+
+
+@mcp.tool()
+async def entites_ign(
+    couche: Annotated[str, Field(description="Nom technique WFS, ex. BDTOPO_V3:batiment, RPG.LATEST:parcelles_graphiques")],
+    lon: Lon,
+    lat: Lat,
+    rayon_m: Rayon = 500,
+    champs: Annotated[list[str] | None, Field(description="Attributs à garder (tous les attributs simples par défaut) ; leurs stats vont dans le résumé")] = None,
+    champ_suggere: Annotated[str | None, Field(description="Attribut conseillé pour la symbologie, ex. hauteur")] = None,
+    limite: Limite = 500,
+    offset: Offset = 0,
+) -> dict:
+    """Objets d'une couche WFS IGN autour d'un point, en COUCHE CARTE (GeoJSON) : bâtiments, routes, parcelles agricoles…
+    Le GeoJSON part sur la carte ; le modèle ne reçoit que le résumé et la pagination."""
+    return await _sur(ign.entites(couche, lon, lat, rayon_m, champs, champ_suggere, limite, offset))
+
+
 CATALOGUE = {
     "live_sans_cle": {
         "Découpage administratif / COG": "resoudre_territoire",
         "Base Adresse Nationale": "geocoder",
         "Cadastre PCI": "parcelles",
-        "DVF géolocalisées (5 ans)": "marche_immobilier",
+        "DVF géolocalisées (5 ans)": "marche_immobilier, ventes_carte (couche)",
         "BDNB": "batiments",
         "BD TOPO": "batiments_autour, interroger_couche_ign",
         "DPE ADEME": "dpe_logements",
         "Géoportail de l'Urbanisme": "urbanisme",
         "Géorisques": "risques",
-        "Tout le WFS IGN (RPG, OCS GE, ADMIN EXPRESS...)": "lister_couches_ign, interroger_couche_ign",
+        "Tout le WFS IGN (RPG, OCS GE, ADMIN EXPRESS...)": "lister_couches_ign, interroger_couche_ign, entites_ign (couche)",
     },
     "a_venir": {
         "Carreaux Filosofi 200 m": "ingestion PostGIS (fichiers seulement)",

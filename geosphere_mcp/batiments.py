@@ -33,12 +33,13 @@ def _periode(annee: int | None) -> str:
     return "2013 et après"
 
 
-async def wfs(couche: str, lon: float, lat: float, rayon_m: float, max_objets: int = 5000) -> tuple[list[dict], int | None]:
+async def wfs(couche: str, lon: float, lat: float, rayon_m: float, max_objets: int = 5000, debut: int = 0) -> tuple[list[dict], int | None]:
     x0, y0, x1, y1 = bbox_autour(lon, lat, rayon_m)
     fc = await get_json(WFS, {
         "service": "WFS", "version": "2.0.0", "request": "GetFeature", "typeNames": couche,
         "outputFormat": "application/json", "srsName": "EPSG:4326", "count": max_objets,
         "bbox": f"{y0},{x0},{y1},{x1},urn:ogc:def:crs:EPSG::4326",
+        **({"startIndex": debut} if debut else {}),
     }, source=f"WFS IGN {couche}")
     return fc.get("features", []), fc.get("numberMatched")
 

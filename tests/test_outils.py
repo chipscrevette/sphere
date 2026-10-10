@@ -203,6 +203,30 @@ async def test_source_toujours_citee():
     assert r["source"]["licence"].startswith("Licence Ouverte") and r["source"]["producteur"]
 
 
+async def test_ventes_carte_couche_et_pagination():
+    r = await appel("ventes_carte", code_insee="69266", limite=2)
+    assert r["geojson"]["type"] == "FeatureCollection" and len(r["geojson"]["features"]) == 2
+    f = r["geojson"]["features"][0]
+    assert f["geometry"] == {"type": "Point", "coordinates": [4.88, 45.77]}
+    assert f["properties"]["prix_m2"] == 5000 and f["properties"]["adresse"] == "14 RUE TEST"
+    assert r["pagination"] == {"total": 3, "offset": 0, "renvoyees": 2, "offset_suivant": 2}
+    assert r["couche"]["champ_suggere"] == "prix_m2" and r["resume"]["prix_m2"]["n"] == 3
+    suite = await appel("ventes_carte", code_insee="69266", limite=2, offset=2)
+    assert suite["geojson"]["features"][0]["properties"]["type_bien"] == "Maison" and suite["pagination"]["offset_suivant"] is None
+
+
+async def test_ventes_carte_neuf_sans_vefa():
+    r = await appel("ventes_carte", code_insee="69266", neuf=True)
+    assert "VEFA" in r["erreur"]
+
+
+async def test_entites_ign():
+    r = await appel("entites_ign", couche="BDTOPO_V3:batiment", lon=4.88, lat=45.77, champs=["hauteur", "usage_1"], champ_suggere="hauteur")
+    assert r["couche"]["nb_entites"] == 2 and set(r["couche"]["champs"]) == {"hauteur", "usage_1"}
+    assert r["resume"]["hauteur"]["max"] == 15.0
+    assert set(r["geojson"]["features"][1]["properties"]) == {"hauteur", "usage_1"}
+
+
 # --- Appels réels : pytest -m live -------------------------------------------------------------
 
 @pytest.mark.live
@@ -220,6 +244,8 @@ async def test_source_toujours_citee():
     ("risques", {"code_insee": "69266"}),
     ("lister_couches_ign", {"recherche": "rpg"}),
     ("interroger_couche_ign", {"couche": "BDTOPO_V3:troncon_de_route", "lon": 4.88, "lat": 45.77}),
+    ("ventes_carte", {"code_insee": "64102", "type_bien": "Maison"}),
+    ("entites_ign", {"couche": "BDTOPO_V3:batiment", "lon": 4.88, "lat": 45.77, "rayon_m": 200, "champ_suggere": "hauteur"}),
 ])
 async def test_live(nom, args):
     r = await appel(nom, **args)

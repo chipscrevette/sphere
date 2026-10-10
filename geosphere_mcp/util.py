@@ -60,3 +60,38 @@ def bbox_autour(lon: float, lat: float, rayon_m: float) -> tuple[float, float, f
 
 def departement_de(code_insee: str) -> str:
     return code_insee[:3] if code_insee.startswith("97") else code_insee[:2]
+
+
+def arrondir_coords(geom: dict | None, dec: int = 6) -> dict | None:
+    """Coordonnées à 6 décimales (~10 cm) : allège nettement le GeoJSON."""
+    if not geom or "coordinates" not in geom:
+        return geom
+
+    def r(c):
+        return round(c, dec) if isinstance(c, (int, float)) else [r(x) for x in c]
+
+    return {**geom, "coordinates": r(geom["coordinates"])}
+
+
+def couche_geojson(nom: str, features: list[dict], *, source: dict, offset: int = 0, limite: int = 2000, total: int | None = None,
+                   champ_suggere: str | None = None, resume: dict | None = None, **extra: Any) -> dict:
+    """Réponse « couche » : un résumé court pour le modèle, et le GeoJSON pour la carte.
+
+    Contrat avec l'artifact : la clé `geojson` est chargée comme couche puis RETIRÉE avant de donner
+    le résultat au modèle, qui ne lit que etape, couche, pagination et resume.
+    Si `total` est absent, `features` est la liste complète et on découpe la page ici.
+    """
+    if total is None:
+        total, features = len(features), features[offset:offset + limite]
+    suivant = offset + len(features) if offset + len(features) < total else None
+    geom = next((f["geometry"]["type"] for f in features if f.get("geometry")), None)
+    return reponse(
+        f"Couche · {nom} · {fr(len(features))} entités" + (f" sur {fr(total)}" if suivant is not None or offset else ""),
+        source,
+        couche={"nom": nom, "geometrie": geom, "nb_entites": len(features), "champ_suggere": champ_suggere,
+                "champs": list(features[0]["properties"]) if features else []},
+        pagination={"total": total, "offset": offset, "renvoyees": len(features), "offset_suivant": suivant},
+        **({"resume": resume} if resume else {}),
+        **extra,
+        geojson={"type": "FeatureCollection", "features": features},
+    )

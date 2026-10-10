@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 
 from .batiments import WFS, wfs
 from .http import SourceError, client
-from .util import fr, repartition, reponse, stats
+from .util import arrondir_coords, couche_geojson, fr, repartition, reponse, stats
 
 SRC_IGN = {"producteur": "IGN et partenaires, WFS Géoplateforme", "url": "https://geoservices.ign.fr/services-geoplateforme-diffusion"}
 _couches: tuple[float, list[dict]] | None = None
@@ -63,3 +63,24 @@ async def interroger_couche(couche: str, lon: float, lat: float, rayon_m: float,
         attributs=resume,
         exemple=props[0] if len(props) <= 3 else None,
     )
+
+
+async def entites(couche: str, lon: float, lat: float, rayon_m: float, champs: list[str] | None, champ_suggere: str | None,
+                  limite: int, offset: int) -> dict:
+    feats, total = await wfs(couche, lon, lat, rayon_m, max_objets=limite, debut=offset)
+    if not feats:
+        raise SourceError(f"Aucun objet {couche} dans un carré de {fr(2 * rayon_m)} m")
+    garder = set(champs) if champs else None
+    out = [{"type": "Feature", "geometry": arrondir_coords(f.get("geometry")),
+            "properties": {k: v for k, v in f["properties"].items() if (k in garder if garder else not isinstance(v, (dict, list)))}}
+           for f in feats]
+    total = total if isinstance(total, int) and total >= offset + len(out) else offset + len(out) + (1 if len(out) == limite else 0)
+    props = [f["properties"] for f in out]
+    resume = {}
+    for k in champs or []:
+        num = [p.get(k) for p in props if isinstance(p.get(k), (int, float)) and not isinstance(p.get(k), bool)]
+        if num:
+            resume[k] = stats(num)
+    nom = couche.split(":")[-1].replace("_", " ")
+    return couche_geojson(nom, out, source={**SRC_IGN, "couche": couche}, offset=offset, limite=limite, total=total,
+                          champ_suggere=champ_suggere, resume=resume or None)
