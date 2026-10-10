@@ -200,3 +200,17 @@ async def test_geocodage_repli_photon(monkeypatch):
 async def test_modis_message_clair(stac):
     r = await appel("occupation_sol", annee=2010, bbox=BBOX, produit="modis")
     assert "esa-cci" in r["erreur"]
+
+
+def test_noms_de_couches():
+    from geosphere_mcp.satellite import nom_couche
+    assert nom_couche("Occupation 1995 Barrage des Trois-Gorges") == "occupation_1995_barrage_trois_gorges"
+    assert nom_couche("Changements 1995→2020 Barrage des Trois-Gorges") == "changements_1995_2020_barrage_trois_gorges"
+    assert nom_couche("cop-dem-glo-30 data Île d'Oléron") == "cop_dem_glo_30_data_ile_oleron"
+    assert nom_couche("三峡大坝") == "couche"
+
+
+async def test_evolution_noms_courts(stac):
+    r = await appel("evolution_occupation_sol", annees=[1995, 2005], bbox=BBOX, couches=True)
+    assert [c["raster"]["nom"] for c in r["couches"]] == ["occupation_1995_emprise_donnee", "occupation_2005_emprise_donnee"]
+    assert r["changements"]["raster"]["nom"] == "changements_1995_2005_emprise_donnee"
