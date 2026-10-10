@@ -162,3 +162,24 @@ async def test_signature_par_compte(monkeypatch):
 def test_annee_modis_depuis_identifiant():
     from geosphere_mcp.satellite import _annee_item
     assert _annee_item({"id": "MCD12Q1.A2010001.h27v05.061.2022169161028", "properties": {"datetime": None}}) == "2010"
+
+
+async def test_geocodage_repli_photon(monkeypatch):
+    def route(req: httpx.Request) -> httpx.Response:
+        h = urlparse(str(req.url)).netloc
+        if h == "nominatim.openstreetmap.org":
+            return httpx.Response(429, text="Too many requests")
+        if h == "photon.komoot.io":
+            return httpx.Response(200, json={"features": [{"geometry": {"coordinates": [111.0, 30.82]}, "properties": {"name": "Three Gorges Dam"}}]})
+        return httpx.Response(500)
+
+    gh._cache.clear()
+    monkeypatch.setattr(gh, "_client", httpx.AsyncClient(transport=httpx.MockTransport(route)))
+    from geosphere_mcp.satellite import emprise
+    b, nom = await emprise(None, "Barrage des Trois-Gorges", 5)
+    assert nom == "Three Gorges Dam" and b[0] < 111.0 < b[2]
+
+
+async def test_modis_message_clair(stac):
+    r = await appel("occupation_sol", annee=2010, bbox=BBOX, produit="modis")
+    assert "esa-cci" in r["erreur"]

@@ -29,6 +29,7 @@ from .util import fr, reponse
 STAC = "https://planetarycomputer.microsoft.com/api/stac/v1"
 SAS = "https://planetarycomputer.microsoft.com/api/sas/v1/token"
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
+PHOTON = "https://photon.komoot.io/api/"
 SRC_PC = {"producteur": "Microsoft Planetary Computer (catalogue STAC public)", "url": "https://planetarycomputer.microsoft.com/catalog"}
 LICENCES = {
     "landsat-c2-l2": "USGS Landsat Collection 2 niveau 2, domaine public",
@@ -61,13 +62,10 @@ async def emprise(bbox: list[float] | None, lieu: str | None, rayon_km: float) -
             raise SourceError("bbox attendue : [lon_min, lat_min, lon_max, lat_max] en WGS84")
         b, nom = list(bbox), "emprise donnée"
     elif lieu:
-        res = await get_json(NOMINATIM, {"q": lieu, "format": "json", "limit": 1}, source="Géocodage OpenStreetMap")
-        if not res:
-            raise SourceError(f"Lieu introuvable : « {lieu} ». Donner une bbox [lon_min, lat_min, lon_max, lat_max].")
-        lon, lat = float(res[0]["lon"]), float(res[0]["lat"])
+        lon, lat, libelle = await _geocoder(lieu)
         dlat = rayon_km / 111.32
         dlon = rayon_km / (111.32 * math.cos(math.radians(lat)))
-        b, nom = [lon - dlon, lat - dlat, lon + dlon, lat + dlat], res[0].get("display_name", lieu).split(",")[0]
+        b, nom = [lon - dlon, lat - dlat, lon + dlon, lat + dlat], libelle
     else:
         raise SourceError("Donner une bbox [lon_min, lat_min, lon_max, lat_max] ou un lieu (+ rayon_km)")
     lat0 = (b[1] + b[3]) / 2
@@ -76,6 +74,25 @@ async def emprise(bbox: list[float] | None, lieu: str | None, rayon_km: float) -
     if max(larg, haut) > MAX_COTE_KM:
         raise SourceError(f"Zone de {larg:.0f} × {haut:.0f} km : {MAX_COTE_KM} km de côté au maximum. Réduire la zone ou la découper.")
     return b, nom
+
+
+async def _geocoder(lieu: str) -> tuple[float, float, str]:
+    """Nominatim, puis Photon (même base OpenStreetMap) : Nominatim limite souvent les IP partagées des hébergeurs (429)."""
+    try:
+        res = await get_json(NOMINATIM, {"q": lieu, "format": "json", "limit": 1}, source="Géocodage OpenStreetMap")
+        if res:
+            return float(res[0]["lon"]), float(res[0]["lat"]), res[0].get("display_name", lieu).split(",")[0]
+    except SourceError:
+        pass
+    try:
+        fc = await get_json(PHOTON, {"q": lieu, "limit": 1}, source="Géocodage Photon")
+    except SourceError as e:
+        raise SourceError(f"Géocodage indisponible pour « {lieu} » ({e}). Donner une bbox [lon_min, lat_min, lon_max, lat_max].") from e
+    feats = fc.get("features") or []
+    if not feats:
+        raise SourceError(f"Lieu introuvable : « {lieu} ». Donner une bbox [lon_min, lat_min, lon_max, lat_max].")
+    lon, lat = feats[0]["geometry"]["coordinates"][:2]
+    return float(lon), float(lat), feats[0].get("properties", {}).get("name") or lieu
 
 
 def _grille(bbox: list[float], res_native_m: float, taille_max: int):
@@ -389,8 +406,6 @@ def produit_auto(annee: int) -> str:
         return "io-lulc"
     if 1992 <= annee <= 2020:
         return "esa-cci"
-    if 2001 <= annee <= 2023:
-        return "modis"
     raise SourceError(f"Pas de carte d'occupation du sol déjà classée pour {annee} (1992–2023). "
                       "Pour 1984–1991 : composite_satellite(classer=True), ou classification supervisée dans Géosphère.")
 
@@ -438,6 +453,9 @@ def _mosaique_sync(hrefs: list[str], crs, transform, w: int, h: int, res: float,
 async def occupation_sol(bbox: list[float] | None, lieu: str | None, rayon_km: float, annee: int, produit: str, taille_max: int, geotiff: bool) -> dict:
     zone, nom = await emprise(bbox, lieu, rayon_km)
     produit = produit_auto(annee) if produit == "auto" else produit
+    if produit == "modis":
+        raise SourceError("MODIS indisponible : la collection modis-12Q1-061 de Planetary Computer est vide. "
+                          "Utiliser esa-cci (1992–2020, 300 m) ou io-lulc (2017–2023, 10 m).")
     p = PRODUITS[produit]
     a0, a1 = p["annees"]
     if not a0 <= annee <= a1:
