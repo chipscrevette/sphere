@@ -1,6 +1,6 @@
 [project]
 name = "geosphere-mcp"
-version = "0.4.1"
+version = "0.4.0"
 description = "Serveur MCP Géosphère : données SIG françaises en direct (IGN, BAN, cadastre, DVF, BDNB, DPE, GPU, Géorisques)"
 requires-python = ">=3.11"
 dependencies = ["mcp>=2.2,<3", "httpx>=0.27", "numpy>=1.26", "rasterio>=1.3.9"]

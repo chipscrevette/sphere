@@ -18,7 +18,6 @@ import datetime as dt
 import math
 import re
 import time
-import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
@@ -80,13 +79,13 @@ async def emprise(bbox: list[float] | None, lieu: str | None, rayon_km: float) -
 async def _geocoder(lieu: str) -> tuple[float, float, str]:
     """Nominatim, puis Photon (même base OpenStreetMap) : Nominatim limite souvent les IP partagées des hébergeurs (429)."""
     try:
-        res = await get_json(NOMINATIM, {"q": lieu, "format": "json", "limit": 1, "accept-language": "fr"}, source="Géocodage OpenStreetMap")
+        res = await get_json(NOMINATIM, {"q": lieu, "format": "json", "limit": 1}, source="Géocodage OpenStreetMap")
         if res:
             return float(res[0]["lon"]), float(res[0]["lat"]), res[0].get("display_name", lieu).split(",")[0]
     except SourceError:
         pass
     try:
-        fc = await get_json(PHOTON, {"q": lieu, "limit": 1, "lang": "fr"}, source="Géocodage Photon")
+        fc = await get_json(PHOTON, {"q": lieu, "limit": 1}, source="Géocodage Photon")
     except SourceError as e:
         raise SourceError(f"Géocodage indisponible pour « {lieu} » ({e}). Donner une bbox [lon_min, lat_min, lon_max, lat_max].") from e
     feats = fc.get("features") or []
@@ -217,22 +216,8 @@ def _geotiff(data: np.ndarray, crs, transform, nodata, noms: list[str], palette:
         return base64.b64encode(mem.read()).decode()
 
 
-MOTS_VIDES = {"de", "des", "du", "d", "la", "le", "les", "l", "et", "en", "a", "au", "aux"}
-
-
-def nom_couche(texte: str) -> str:
-    """Nom de couche court : minuscules sans accents, mots vides retirés, « _ » entre les mots.
-    « Occupation 1995 Barrage des Trois-Gorges » → occupation_1995_barrage_trois_gorges."""
-    espaces = "".join(c if c.isalnum() else " " for c in unicodedata.normalize("NFC", texte))  # « → », « - », « ' » séparent
-    ascii_ = unicodedata.normalize("NFKD", espaces).encode("ascii", "ignore").decode().lower()
-    mots = [m for m in re.split(r"[^a-z0-9]+", ascii_) if m and m not in MOTS_VIDES]
-    return "_".join(mots) or "couche"
-
-
 def _raster_meta(nom: str, crs, w: int, h: int, res: float, bbox: list[float], bandes: list[str], b64: str, **extra) -> dict:
-    if "serie" in extra:
-        extra["serie"] = nom_couche(extra["serie"])
-    return {"nom": nom_couche(nom), "titre": nom, "format": "image/tiff", "crs": crs, "largeur": w, "hauteur": h, "resolution_m": round(res, 1),
+    return {"nom": nom, "format": "image/tiff", "crs": crs, "largeur": w, "hauteur": h, "resolution_m": round(res, 1),
             "bbox_wgs84": [round(v, 5) for v in bbox], "bandes": bandes, "taille_ko": round(len(b64) * 3 / 4 / 1024), **extra}
 
 
@@ -507,7 +492,7 @@ async def occupation_sol(bbox: list[float] | None, lieu: str | None, rayon_km: f
     if res > p["res"] * 1.5:
         out["avertissement"] = f"Zone grande : lue à {res:.0f} m au lieu de {p['res']} m natifs (petites surfaces lissées)."
     if geotiff:
-        out["raster"], out["geotiff_base64"] = _couche_classee(harmo, (crs, transform, w, h, res), zone, f"Occupation {annee} {nom}", produit=produit)
+        out["raster"], out["geotiff_base64"] = _couche_classee(harmo, (crs, transform, w, h, res), zone, f"Occupation {produit} {annee} {nom}")
     princ = max(out["occupation"], key=lambda o: o["part_pct"]) if out["occupation"] else None
     return reponse(f"Occupation du sol {produit} {annee} · {nom}" + (f" · {princ['classe']} {fr(princ['part_pct'], 1)} %" if princ else ""),
                    {**SRC_PC, "licence": LICENCES[p["collection"]], "collection": p["collection"]}, **out)
