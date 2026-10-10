@@ -51,6 +51,7 @@ GDAL_ENV = {
     "VSI_CACHE": "TRUE",
 }
 MAX_COTE_KM = 300
+TAILLE_MAX_COMPOSITE = 512  # au-delà, le composite + les échantillons dépassent les 512 Mo de Render gratuit
 _jetons: dict[str, tuple[float, str]] = {}
 
 
@@ -261,27 +262,25 @@ def _reflectance(capteur: str, item: dict, brut: np.ndarray) -> np.ndarray:
 
 
 def _composite_sync(capteur: str, items: list[dict], crs, transform, w: int, h: int, res: float) -> tuple[np.ndarray, int]:
+    """Médiane par bande, une bande à la fois : Render gratuit n'a que 512 Mo, la pile complète (scènes × bandes) le saturait."""
+    import warnings
     cfg = CAPTEURS[capteur]
-    pile = np.full((len(items), len(BANDES), h, w), np.nan, dtype=np.float32)
-    taches = [(it["assets"][cfg["qa"]]["href"], crs, transform, w, h, "nearest", res) for it in items]
+    valides = []
+    for qa, _ in _en_parallele([(it["assets"][cfg["qa"]]["href"], crs, transform, w, h, "nearest", res) for it in items], _lire):
+        valides.append(((qa.astype(np.uint32) & QA_REJET) == 0) & (qa > 0) if capteur == "landsat" else np.isin(qa, SCL_VALIDES))
+    comp = np.empty((len(BANDES), h, w), dtype=np.float32)
     for k, b in enumerate(cfg["assets"]):
-        taches += [(it["assets"][b]["href"], crs, transform, w, h, "average", res) for it in items]
-    lus = _en_parallele(taches, _lire)
-    n = len(items)
-    for i, it in enumerate(items):
-        qa = lus[i][0]
-        valide = ((qa.astype(np.uint32) & QA_REJET) == 0) & (qa > 0) if capteur == "landsat" else np.isin(qa, SCL_VALIDES)
-        for k in range(len(BANDES)):
-            r = _reflectance(capteur, it, lus[n * (k + 1) + i][0])
-            r[~valide] = np.nan
-            pile[i, k] = r
-    with np.errstate(all="ignore"):
-        import warnings
-
-        with warnings.catch_warnings():
+        lus = _en_parallele([(it["assets"][b]["href"], crs, transform, w, h, "average", res) for it in items], _lire)
+        pile = np.empty((len(items), h, w), dtype=np.float32)
+        for i, it in enumerate(items):
+            pile[i] = _reflectance(capteur, it, lus[i][0])
+            pile[i][~valides[i]] = np.nan
+        del lus
+        with np.errstate(all="ignore"), warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
-            comp = np.nanmedian(pile, axis=0)
-    nb_obs = np.isfinite(pile[:, 0]).sum(axis=0)
+            comp[k] = np.nanmedian(pile, axis=0)
+        del pile
+    nb_obs = np.sum(valides, axis=0)
     return comp, int((nb_obs > 0).sum())
 
 
@@ -334,8 +333,11 @@ async def composite(bbox: list[float] | None, lieu: str | None, rayon_km: float,
     if annee < 1984:
         raise SourceError("Landsat TM commence en 1984 : pas de composite plus ancien ici")
     cfg = CAPTEURS[capteur]
-    crs, transform, w, h, res = _grille(zone, cfg["res"], taille_max)
     avert = []
+    if taille_max > TAILLE_MAX_COMPOSITE:
+        avert.append(f"taille_max ramenée à {TAILLE_MAX_COMPOSITE} px (mémoire du serveur)")
+        taille_max = TAILLE_MAX_COMPOSITE
+    crs, transform, w, h, res = _grille(zone, cfg["res"], taille_max)
     items, fenetre, comp, couverts = [], None, None, 0
     for debut, fin, libelle in _fenetres(annee, mois_debut, mois_fin):
         trouves = await _chercher(cfg["collection"], zone, debut, fin, nuages_max=70)
