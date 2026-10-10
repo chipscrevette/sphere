@@ -401,6 +401,16 @@ PALETTE_HARMO = {0: (0, 0, 0, 0), 1: (65, 155, 223, 255), 2: (57, 125, 73, 255),
                  5: (196, 40, 27, 255), 6: (165, 155, 143, 255), 7: (122, 135, 198, 255), 8: (230, 240, 250, 255)}
 
 
+LEGENDE_HARMO = [{"code": i + 1, "classe": g} for i, g in enumerate(HARMO)]
+COULEURS_HARMO = {str(k): "#%02x%02x%02x" % v[:3] for k, v in PALETTE_HARMO.items() if k}
+
+
+def _couche_classee(harmo: np.ndarray, grille: tuple, zone: list[float], nom: str, bande: str = "occupation", **extra) -> tuple[dict, str]:
+    crs, transform, w, h, res = grille
+    b64 = _geotiff(harmo, crs, transform, 0, [bande], palette=PALETTE_HARMO)
+    return _raster_meta(nom, crs, w, h, res, zone, [bande], b64, nodata=0, legende=LEGENDE_HARMO, couleurs=COULEURS_HARMO, **extra), b64
+
+
 def produit_auto(annee: int) -> str:
     if 2017 <= annee <= 2023:
         return "io-lulc"
@@ -450,7 +460,9 @@ def _mosaique_sync(hrefs: list[str], crs, transform, w: int, h: int, res: float,
     return out
 
 
-async def occupation_sol(bbox: list[float] | None, lieu: str | None, rayon_km: float, annee: int, produit: str, taille_max: int, geotiff: bool) -> dict:
+async def occupation_sol(bbox: list[float] | None, lieu: str | None, rayon_km: float, annee: int, produit: str, taille_max: int, geotiff: bool,
+                        grille: tuple | None = None, garder: dict | None = None) -> dict:
+    """`grille` impose la grille de sortie (séries d'années superposables) ; `garder` reçoit le raster harmonisé et sa grille."""
     zone, nom = await emprise(bbox, lieu, rayon_km)
     produit = produit_auto(annee) if produit == "auto" else produit
     if produit == "modis":
@@ -465,24 +477,22 @@ async def occupation_sol(bbox: list[float] | None, lieu: str | None, rayon_km: f
     for it in items:
         asset = it["assets"].get(p["asset"]) or next(v for v in it["assets"].values() if "image/tiff" in v.get("type", ""))
         hrefs.append(await _signer(p["collection"], asset["href"]))
-    crs, transform, w, h, res = _grille(zone, p["res"], taille_max)
+    crs, transform, w, h, res = grille or _grille(zone, p["res"], taille_max)
     brut = await asyncio.to_thread(_mosaique_sync, hrefs, crs, transform, w, h, res, p["ignorer"])
     detail = _parts(brut, [{"code": c, "classe": f"{lib} ({c})"} for c, (lib, _) in p["classes"].items()], res, exclure=p["ignorer"])
     harmo = np.zeros(brut.shape, dtype=np.uint8)
     for c, (_, g) in p["classes"].items():
         harmo[brut == c] = HARMO.index(g) + 1
-    legende = [{"code": i + 1, "classe": g} for i, g in enumerate(HARMO)]
+    if garder is not None:
+        garder.update(harmo=harmo, grille=(crs, transform, w, h, res))
     connus = np.isin(brut, list(p["classes"])).sum()
     out = {"zone": {"nom": nom, "bbox_wgs84": [round(v, 5) for v in zone]}, "produit": produit, "annee": annee,
-           "resolution_m": round(res), "occupation": _parts(harmo, legende, res), "detail": detail[:15],
+           "resolution_m": round(res), "occupation": _parts(harmo, LEGENDE_HARMO, res), "detail": detail[:15],
            "pixels_classes_pct": round(100 * connus / (w * h), 1)}
     if res > p["res"] * 1.5:
         out["avertissement"] = f"Zone grande : lue à {res:.0f} m au lieu de {p['res']} m natifs (petites surfaces lissées)."
     if geotiff:
-        b64 = _geotiff(harmo, crs, transform, 0, ["occupation"], palette=PALETTE_HARMO)
-        out["raster"] = _raster_meta(f"Occupation {produit} {annee} {nom}", crs, w, h, res, zone, ["occupation"], b64, nodata=0,
-                                     legende=legende, couleurs={str(k): "#%02x%02x%02x" % v[:3] for k, v in PALETTE_HARMO.items() if k})
-        out["geotiff_base64"] = b64
+        out["raster"], out["geotiff_base64"] = _couche_classee(harmo, (crs, transform, w, h, res), zone, f"Occupation {produit} {annee} {nom}")
     princ = max(out["occupation"], key=lambda o: o["part_pct"]) if out["occupation"] else None
     return reponse(f"Occupation du sol {produit} {annee} · {nom}" + (f" · {princ['classe']} {fr(princ['part_pct'], 1)} %" if princ else ""),
                    {**SRC_PC, "licence": LICENCES[p["collection"]], "collection": p["collection"]}, **out)
@@ -524,20 +534,28 @@ async def extraire(collection: str, asset: str, bbox: list[float] | None, lieu: 
                    geotiff_base64=b64)
 
 
-async def evolution(bbox: list[float] | None, lieu: str | None, rayon_km: float, annees: list[int], produit: str, taille_max: int) -> dict:
-    """Série d'occupation du sol sur plusieurs années, même produit autant que possible pour comparer ce qui est comparable."""
+async def evolution(bbox: list[float] | None, lieu: str | None, rayon_km: float, annees: list[int], produit: str, taille_max: int,
+                    couches: bool = False) -> dict:
+    """Série d'occupation du sol sur plusieurs années, même produit autant que possible pour comparer ce qui est comparable.
+    Avec `couches` : une couche classée par année, toutes sur la même grille (rideau, curseur d'années), et une couche
+    « changements » où seuls les pixels qui ont changé portent leur nouvelle classe."""
     annees = sorted(set(annees))
     if produit == "auto":
         produit = "esa-cci" if all(1992 <= a <= 2020 for a in annees) else ("io-lulc" if all(2017 <= a <= 2023 for a in annees) else "auto")
     zone, nom = await emprise(bbox, lieu, rayon_km)
-    lignes, produits = [], set()
+    prods = {a: (produit_auto(a) if produit == "auto" else produit) for a in annees if produit != "auto" or 1992 <= a <= 2023}
+    res_min = max((PRODUITS[p]["res"] for p in prods.values() if p in PRODUITS), default=10)
+    grille = _grille(zone, res_min, taille_max)  # la plus grossière des résolutions : toutes les années se superposent
+    lignes, produits, rasters = [], set(), {}
     for a in annees:
+        garde: dict = {}
         try:
-            r = await occupation_sol(zone, None, rayon_km, a, produit, taille_max, geotiff=False)
+            r = await occupation_sol(zone, None, rayon_km, a, produit, taille_max, geotiff=False, grille=grille, garder=garde)
         except SourceError as e:
             lignes.append({"annee": a, "erreur": str(e)})
             continue
         produits.add(r["produit"])
+        rasters[a] = (r["produit"], garde["harmo"])
         lignes.append({"annee": a, "produit": r["produit"], **{o["classe"]: o["part_pct"] for o in r["occupation"]}})
     ok = [l for l in lignes if "erreur" not in l]
     if not ok:
@@ -545,8 +563,28 @@ async def evolution(bbox: list[float] | None, lieu: str | None, rayon_km: float,
     evol = {c: round(ok[-1].get(c, 0) - ok[0].get(c, 0), 1) for c in HARMO if any(c in l for l in ok)}
     out = {"zone": {"nom": nom, "bbox_wgs84": [round(v, 5) for v in zone]}, "tableau_pct": lignes,
            "evolution_points": {"de": ok[0]["annee"], "a": ok[-1]["annee"], "variation_points_pct": evol}}
+    a0, a1 = ok[0]["annee"], ok[-1]["annee"]
+    avant, apres = rasters[a0][1], rasters[a1][1]
+    valides = (avant > 0) & (apres > 0)
+    change = valides & (avant != apres)
+    km2 = grille[4] ** 2 / 1e6
+    paires, n = np.unique(avant[change].astype(np.uint16) * 16 + apres[change], return_counts=True)
+    transitions = sorted(({"de": HARMO[int(k) // 16 - 1], "vers": HARMO[int(k) % 16 - 1], "surface_km2": round(int(c) * km2, 2)}
+                          for k, c in zip(paires, n)), key=lambda t: -t["surface_km2"])
+    out["changements"] = {"de": a0, "a": a1, "part_changee_pct": round(100 * change.sum() / max(valides.sum(), 1), 1),
+                          "principales_transitions": transitions[:10]}
     if len(produits) > 1:
         out["avertissement"] = (f"Produits mélangés ({', '.join(sorted(produits))}) : résolutions et nomenclatures différentes, "
                                 "les écarts entre produits ne sont pas tous des changements réels.")
-    return reponse(f"Évolution occupation du sol · {nom} · {ok[0]['annee']}–{ok[-1]['annee']} · {len(ok)} années",
+    if couches:
+        out["couches"] = []
+        for a, (p, harmo) in rasters.items():
+            meta, b64 = _couche_classee(harmo, grille, zone, f"Occupation {a} {nom}", annee=a, produit=p, serie=f"evolution {nom}")
+            out["couches"].append({"annee": a, "raster": meta, "geotiff_base64": b64})
+        meta, b64 = _couche_classee(np.where(change, apres, 0).astype(np.uint8), grille, zone, f"Changements {a0}→{a1} {nom}",
+                                    bande="nouvelle_classe", serie=f"evolution {nom}",
+                                    description=f"Pixels dont la classe a changé entre {a0} et {a1}, colorés selon leur classe en {a1} ; le reste est transparent.")
+        out["changements"]["raster"], out["changements"]["geotiff_base64"] = meta, b64
+    return reponse(f"Évolution occupation du sol · {nom} · {a0}–{a1} · {len(ok)} années"
+                   + (f" · {out['changements']['part_changee_pct']} % de la zone a changé" if len(ok) > 1 else ""),
                    {**SRC_PC, "licence": "; ".join(LICENCES[PRODUITS[p]['collection']] for p in sorted(produits))}, **out)

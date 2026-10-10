@@ -26,9 +26,10 @@ Les résultats sont déjà agrégés : ne pas redemander le détail brut sauf be
 Pour AFFICHER des entités sur la carte (ventes une par une, bâtiments, parcelles agricoles…), utiliser ventes_carte ou entites_ign :
 leur clé `geojson` est une couche à charger telle quelle ; ne jamais la recopier dans la réponse.
 Hors de France ou en imagerie : composite_satellite (images sans nuages), occupation_sol et evolution_occupation_sol (% eau, forêt, bâti…),
-extraire_raster pour tout autre raster mondial. Leur clé `geotiff_base64` est un raster à charger tel quel ; ne jamais la recopier."""
+extraire_raster pour tout autre raster mondial. Leur clé `geotiff_base64` est un raster à charger tel quel ; ne jamais la recopier.
+evolution_occupation_sol renvoie une couche par année (`couches`) et une couche `changements`, superposables pour comparer."""
 
-mcp = MCPServer("geosphere", title="Géosphère · données SIG", instructions=INSTRUCTIONS, version="0.3.0")
+mcp = MCPServer("geosphere", title="Géosphère · données SIG", instructions=INSTRUCTIONS, version="0.4.0")
 
 Lon = Annotated[float, Field(description="Longitude WGS84", ge=-180, le=180)]
 Lat = Annotated[float, Field(description="Latitude WGS84", ge=-90, le=90)]
@@ -245,7 +246,7 @@ async def occupation_sol(
     return await _sur(sat.occupation_sol(bbox, lieu, rayon_km, annee, produit, taille_max, geotiff))
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)  # GeoTIFF en base64 : une seule copie dans la réponse
 async def evolution_occupation_sol(
     annees: Annotated[list[int], Field(description="Années à comparer, ex. [1995, 2000, 2005, 2010, 2015, 2020]", min_length=2, max_length=12)],
     bbox: Bbox = None,
@@ -253,9 +254,12 @@ async def evolution_occupation_sol(
     rayon_km: RayonKm = 15,
     produit: Annotated[Literal["auto", "io-lulc", "esa-cci", "modis"], Field(description="auto : un seul produit si possible (ESA CCI pour 1992–2020)")] = "auto",
     taille_max: TailleMax = 512,
+    couches: Annotated[bool, Field(description="Une couche classée par année (même grille, superposables) + une couche des changements, pour les afficher sur la carte")] = False,
 ) -> dict:
-    """Tableau de l'occupation du sol (%) année par année et variation en points entre la première et la dernière année."""
-    return await _sur(sat.evolution(bbox, lieu, rayon_km, annees, produit, taille_max))
+    """Tableau de l'occupation du sol (%) année par année, variation en points et principales transitions (ex. Cultures → Eau, en km²).
+    Avec couches=True : `couches` = [{annee, raster, geotiff_base64}] sur une même grille (comparaison en rideau ou curseur d'années)
+    et `changements.geotiff_base64` (seuls les pixels qui ont changé, colorés selon leur nouvelle classe)."""
+    return await _sur(sat.evolution(bbox, lieu, rayon_km, annees, produit, taille_max, couches))
 
 
 @mcp.tool(structured_output=False)  # GeoTIFF en base64 : une seule copie dans la réponse

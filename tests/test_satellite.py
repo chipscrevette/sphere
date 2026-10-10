@@ -133,9 +133,26 @@ async def test_occupation_sol_io_lulc(stac):
 
 
 async def test_evolution_meme_produit(stac):
-    r = await appel("evolution_occupation_sol", annees=[1995, 2005], bbox=BBOX)
+    r = await appel("evolution_occupation_sol", annees=[1995, 2005], bbox=BBOX, couches=True)
     assert [l["produit"] for l in r["tableau_pct"]] == ["esa-cci", "esa-cci"] and "avertissement" not in r
     assert r["evolution_points"]["variation_points_pct"]["Eau"] > 10  # le réservoir s'étend
+    t = r["changements"]["principales_transitions"][0]
+    assert (t["de"], t["vers"]) == ("Forêt", "Eau") and t["surface_km2"] > 0 and r["changements"]["part_changee_pct"] > 10
+    assert [c["annee"] for c in r["couches"]] == [1995, 2005]
+    grilles = set()
+    for c in r["couches"]:
+        with _ouvrir(c["geotiff_base64"]) as d:
+            grilles.add((d.width, d.height, tuple(d.transform)))
+            assert d.colormap(1)[1][:3] == (65, 155, 223)
+    assert len(grilles) == 1  # années superposables
+    with _ouvrir(r["changements"]["geotiff_base64"]) as d:
+        ch = d.read(1)
+        assert set(np.unique(ch)) <= {0, 1} and (ch == 1).any()  # seuls les pixels devenus Eau
+
+
+async def test_evolution_sans_couches(stac):
+    r = await appel("evolution_occupation_sol", annees=[1995, 2005], bbox=BBOX)
+    assert "couches" not in r and "geotiff_base64" not in r["changements"] and r["changements"]["principales_transitions"]
 
 
 async def test_zone_trop_grande(stac):
