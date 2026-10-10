@@ -29,7 +29,7 @@ Hors de France ou en imagerie : composite_satellite (images sans nuages), occupa
 extraire_raster pour tout autre raster mondial. Leur clé `geotiff_base64` est un raster à charger tel quel ; ne jamais la recopier.
 evolution_occupation_sol renvoie une couche par année (`couches`) et une couche `changements`, superposables pour comparer."""
 
-mcp = MCPServer("geosphere", title="Géosphère · données SIG", instructions=INSTRUCTIONS, version="0.4.0")
+mcp = MCPServer("geosphere", title="Géosphère · données SIG", instructions=INSTRUCTIONS, version="0.5.0")
 
 Lon = Annotated[float, Field(description="Longitude WGS84", ge=-180, le=180)]
 Lat = Annotated[float, Field(description="Latitude WGS84", ge=-90, le=90)]
@@ -223,11 +223,16 @@ async def composite_satellite(
     taille_max: TailleMax = 384,
     classer: Annotated[bool, Field(description="Ajoute des % indicatifs eau / forêt / végétation basse / bâti-sol nu")] = True,
     geotiff: Annotated[bool, Field(description="Renvoie le GeoTIFF 6 bandes (rouge, vert, bleu, pir, swir1, swir2) pour la carte")] = True,
+    echantillons: Annotated[bool, Field(description="Propose des points d'entraînement par classe pour une classification supervisée, à relire sur l'image")] = False,
+    par_classe: Annotated[int, Field(description="Points proposés par classe", ge=5, le=200)] = 40,
 ) -> dict:
     """Image satellite SANS NUAGES d'une année sur une zone du monde : nuages et ombres masqués pixel par pixel,
     médiane des meilleures scènes, fenêtre de dates élargie automatiquement si la zone reste nuageuse.
-    Le GeoTIFF (clé geotiff_base64) part sur la carte ; le modèle ne reçoit que le résumé."""
-    return await _sur(sat.composite(bbox, lieu, rayon_km, annee, capteur, mois_debut, mois_fin, max_scenes, taille_max, classer, geotiff))
+    Le GeoTIFF (clé geotiff_base64) part sur la carte ; le modèle ne reçoit que le résumé.
+    Avec echantillons=True : `echantillons.geojson` = points d'entraînement proposés (classe, code), tirés d'une carte
+    déjà classée et vérifiés sur l'image, à afficher sur l'image pour que l'utilisateur les valide avant de classer."""
+    return await _sur(sat.composite(bbox, lieu, rayon_km, annee, capteur, mois_debut, mois_fin, max_scenes, taille_max, classer, geotiff,
+                                    echantillons, par_classe))
 
 
 @mcp.tool(structured_output=False)  # GeoTIFF en base64 : une seule copie dans la réponse

@@ -18,6 +18,7 @@ import datetime as dt
 import math
 import re
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
@@ -76,16 +77,32 @@ async def emprise(bbox: list[float] | None, lieu: str | None, rayon_km: float) -
     return b, nom
 
 
+_MOTS_VIDES = {"de", "des", "du", "la", "le", "les", "l", "d", "et", "a", "au", "aux", "en", "sur", "the", "of"}
+
+
+def nom_couche(*parties) -> str:
+    """Nom de couche court, explicite, en minuscules, sans accents, espaces remplacés par _ : occsol_1995_barrage_trois_gorges."""
+    mots = []
+    for p in parties:
+        t = unicodedata.normalize("NFKD", str(p)).encode("ascii", "ignore").decode().lower()
+        mots += [m for m in re.split(r"[^a-z0-9]+", t) if m and m not in _MOTS_VIDES]
+    return "_".join(mots)[:48].rstrip("_") or "zone"
+
+
+def _lieu_court(lieu: str | None, nom: str) -> str:
+    return nom_couche(lieu or nom) if (lieu or not nom.startswith("emprise")) else "zone"
+
+
 async def _geocoder(lieu: str) -> tuple[float, float, str]:
     """Nominatim, puis Photon (même base OpenStreetMap) : Nominatim limite souvent les IP partagées des hébergeurs (429)."""
     try:
-        res = await get_json(NOMINATIM, {"q": lieu, "format": "json", "limit": 1}, source="Géocodage OpenStreetMap")
+        res = await get_json(NOMINATIM, {"q": lieu, "format": "json", "limit": 1, "accept-language": "fr"}, source="Géocodage OpenStreetMap")
         if res:
             return float(res[0]["lon"]), float(res[0]["lat"]), res[0].get("display_name", lieu).split(",")[0]
     except SourceError:
         pass
     try:
-        fc = await get_json(PHOTON, {"q": lieu, "limit": 1}, source="Géocodage Photon")
+        fc = await get_json(PHOTON, {"q": lieu, "limit": 1, "lang": "fr"}, source="Géocodage Photon")
     except SourceError as e:
         raise SourceError(f"Géocodage indisponible pour « {lieu} » ({e}). Donner une bbox [lon_min, lat_min, lon_max, lat_max].") from e
     feats = fc.get("features") or []
@@ -309,7 +326,7 @@ def _parts(cl: np.ndarray, legende: list[dict], res: float, exclure: tuple[int, 
 
 
 async def composite(bbox: list[float] | None, lieu: str | None, rayon_km: float, annee: int, capteur: str, mois_debut: int, mois_fin: int,
-                    max_scenes: int, taille_max: int, classer: bool, geotiff: bool) -> dict:
+                    max_scenes: int, taille_max: int, classer: bool, geotiff: bool, echantillons: bool = False, par_classe: int = 40) -> dict:
     zone, nom = await emprise(bbox, lieu, rayon_km)
     capteur = _capteur_auto(annee) if capteur == "auto" else capteur
     if capteur == "sentinel-2" and annee < 2016:
@@ -353,12 +370,18 @@ async def composite(bbox: list[float] | None, lieu: str | None, rayon_km: float,
         out["occupation_indicative"] = _parts(cl, legende, res)
         out["methode_classes"] = ("Seuils d'indices (NDVI, MNDWI, NDBI) sans échantillons : indicatif. Bâti et sol nu se confondent ; "
                                   "pour des % fiables, occupation_sol (cartes déjà classées) ou une classification supervisée dans Géosphère.")
+    if echantillons:
+        try:
+            out["echantillons"] = await _echantillons(zone, annee, comp, (crs, transform, w, h, res), par_classe,
+                                                      nom_couche("echantillons", annee, _lieu_court(lieu, nom)))
+        except SourceError as e:
+            avert.append(f"Pas d'échantillons proposés : {e}")
     if avert:
         out["avertissements"] = avert
     if geotiff:
         data = np.where(np.isfinite(comp), np.clip(np.round(comp * 10000), -1000, 20000), -32768).astype(np.int16)
         b64 = _geotiff(data, crs, transform, -32768, BANDES)
-        out["raster"] = _raster_meta(f"{capteur} {annee} {nom}", crs, w, h, res, zone, BANDES, b64,
+        out["raster"] = _raster_meta(nom_couche(capteur.replace("sentinel-2", "s2"), annee, _lieu_court(lieu, nom)), crs, w, h, res, zone, BANDES, b64,
                                      unite="réflectance × 10 000", nodata=-32768)
         out["geotiff_base64"] = b64
     return reponse(f"Composite {capteur} {annee} · {len(items)} scènes · {valides} % sans nuage · {w}×{h} px à {res:.0f} m",
@@ -492,10 +515,85 @@ async def occupation_sol(bbox: list[float] | None, lieu: str | None, rayon_km: f
     if res > p["res"] * 1.5:
         out["avertissement"] = f"Zone grande : lue à {res:.0f} m au lieu de {p['res']} m natifs (petites surfaces lissées)."
     if geotiff:
-        out["raster"], out["geotiff_base64"] = _couche_classee(harmo, (crs, transform, w, h, res), zone, f"Occupation {produit} {annee} {nom}")
+        out["raster"], out["geotiff_base64"] = _couche_classee(harmo, (crs, transform, w, h, res), zone, nom_couche("occsol", annee, _lieu_court(lieu, nom)))
     princ = max(out["occupation"], key=lambda o: o["part_pct"]) if out["occupation"] else None
     return reponse(f"Occupation du sol {produit} {annee} · {nom}" + (f" · {princ['classe']} {fr(princ['part_pct'], 1)} %" if princ else ""),
                    {**SRC_PC, "licence": LICENCES[p["collection"]], "collection": p["collection"]}, **out)
+
+
+# --- Échantillons d'entraînement proposés (classification supervisée) ---------------------------
+
+def _homogene(cl: np.ndarray, k: int) -> np.ndarray:
+    """Vrai là où tout le voisinage (2k+1)² porte la même classe : centres de plages stables, loin des bordures."""
+    from numpy.lib.stride_tricks import sliding_window_view as fen
+    if k < 1:
+        return np.ones(cl.shape, bool)
+    p = np.pad(cl, k, mode="edge")
+    lo = fen(fen(p, 2 * k + 1, axis=0).min(-1), 2 * k + 1, axis=1).min(-1)
+    hi = fen(fen(p, 2 * k + 1, axis=0).max(-1), 2 * k + 1, axis=1).max(-1)
+    return lo == hi
+
+
+# Contrôle spectral : un échantillon proposé doit ressembler à sa classe sur l'image de l'année (NDVI, MNDWI)
+_COHERENT = {
+    "Eau": lambda ndvi, mndwi: (mndwi > 0.1) & (ndvi < 0.2),
+    "Forêt": lambda ndvi, mndwi: ndvi > 0.45,
+    "Arbustes / prairies": lambda ndvi, mndwi: (ndvi > 0.2) & (ndvi < 0.7),
+    "Cultures": lambda ndvi, mndwi: ndvi > 0.1,
+    "Bâti": lambda ndvi, mndwi: (ndvi < 0.35) & (mndwi < 0.1),
+    "Sol nu": lambda ndvi, mndwi: (ndvi < 0.2) & (mndwi < 0.1),
+}
+
+
+async def _echantillons(zone: list[float], annee: int, comp: np.ndarray, grille: tuple, par_classe: int, nom: str) -> dict:
+    """Points d'entraînement proposés pour une classification supervisée de l'image : tirés d'une carte déjà classée
+    (IO/Esri 10 m dès 2017, sinon ESA CCI 300 m) au centre de plages homogènes, puis gardés seulement s'ils sont
+    cohérents avec l'image elle-même. À relire et corriger avant de lancer la classification."""
+    from rasterio.warp import transform as reprojeter
+    crs, transform, w, h, res = grille
+    ref_annee = min(max(annee, 1992), 2023)
+    produit = produit_auto(ref_annee)
+    garde: dict = {}
+    await occupation_sol(zone, None, 0, ref_annee, produit, max(w, h), geotiff=False, grille=grille, garder=garde)
+    ref = garde["harmo"]
+    k = max(1, round(PRODUITS[produit]["res"] / res / 2))  # environ un pixel de la carte de référence autour du point
+    stable = _homogene(ref, k) & np.isfinite(comp).all(axis=0)
+    with np.errstate(all="ignore"):
+        ndvi = (comp[3] - comp[0]) / (comp[3] + comp[0])
+        mndwi = (comp[1] - comp[4]) / (comp[1] + comp[4])
+    rng = np.random.default_rng(annee)
+    feats, bilan = [], []
+    for code, classe in enumerate(HARMO, 1):
+        cand = stable & (ref == code)
+        n_ref = int(cand.sum())
+        if classe in _COHERENT:
+            cand &= _COHERENT[classe](ndvi, mndwi)
+        lignes, cols = np.nonzero(cand)
+        if not len(lignes):
+            if n_ref:
+                bilan.append({"classe": classe, "proposes": 0, "ecartes_incoherents": n_ref})
+            continue
+        choix = rng.choice(len(lignes), size=min(par_classe, len(lignes)), replace=False)
+        xs, ys = rasterio_xy(transform, lignes[choix], cols[choix])
+        lons, lats = reprojeter(crs, "EPSG:4326", xs, ys)
+        for lon, lat in zip(lons, lats):
+            feats.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [round(lon, 6), round(lat, 6)]},
+                          "properties": {"classe": classe, "code": code}})
+        bilan.append({"classe": classe, "proposes": len(choix)})
+    if not feats:
+        raise SourceError("aucune plage homogène et cohérente trouvée")
+    return {"nom": nom, "methode": (f"Points tirés au centre de plages homogènes de la carte {produit} {ref_annee}, gardés seulement "
+                                    "si l'image de l'année leur ressemble (NDVI, MNDWI). Proposition à relire : ajouter, retirer ou "
+                                    "reclasser les points sur l'image avant de lancer la classification supervisée."),
+            "reference": f"{produit} {ref_annee}" + ("" if ref_annee == annee else f" (année la plus proche de {annee})"),
+            "par_classe": bilan, "legende": LEGENDE_HARMO, "couleurs": COULEURS_HARMO,
+            "geojson": {"type": "FeatureCollection", "features": feats}}
+
+
+def rasterio_xy(transform, lignes, cols):
+    xs = transform.c + (cols + 0.5) * transform.a
+    ys = transform.f + (lignes + 0.5) * transform.e
+    return xs.tolist(), ys.tolist()
 
 
 # --- Extraction générique ------------------------------------------------------------------------
@@ -530,7 +628,7 @@ async def extraire(collection: str, asset: str, bbox: list[float] | None, lieu: 
     return reponse(f"Raster {collection}/{asset} · {nom} · {w}×{h} px à {res:.0f} m",
                    {**SRC_PC, "licence": LICENCES.get(collection, "voir la collection"), "collection": collection},
                    zone={"nom": nom, "bbox_wgs84": [round(v, 5) for v in zone]}, nb_elements=len(hrefs), statistiques=stats,
-                   raster=_raster_meta(f"{collection} {asset} {nom}", crs, w, h, res, zone, [asset], b64, nodata=-9999),
+                   raster=_raster_meta(nom_couche(collection, asset, _lieu_court(lieu, nom)), crs, w, h, res, zone, [asset], b64, nodata=-9999),
                    geotiff_base64=b64)
 
 
@@ -543,6 +641,7 @@ async def evolution(bbox: list[float] | None, lieu: str | None, rayon_km: float,
     if produit == "auto":
         produit = "esa-cci" if all(1992 <= a <= 2020 for a in annees) else ("io-lulc" if all(2017 <= a <= 2023 for a in annees) else "auto")
     zone, nom = await emprise(bbox, lieu, rayon_km)
+    court = _lieu_court(lieu, nom)
     prods = {a: (produit_auto(a) if produit == "auto" else produit) for a in annees if produit != "auto" or 1992 <= a <= 2023}
     res_min = max((PRODUITS[p]["res"] for p in prods.values() if p in PRODUITS), default=10)
     grille = _grille(zone, res_min, taille_max)  # la plus grossière des résolutions : toutes les années se superposent
@@ -579,10 +678,10 @@ async def evolution(bbox: list[float] | None, lieu: str | None, rayon_km: float,
     if couches:
         out["couches"] = []
         for a, (p, harmo) in rasters.items():
-            meta, b64 = _couche_classee(harmo, grille, zone, f"Occupation {a} {nom}", annee=a, produit=p, serie=f"evolution {nom}")
+            meta, b64 = _couche_classee(harmo, grille, zone, nom_couche("occsol", a, court), annee=a, produit=p, serie=court)
             out["couches"].append({"annee": a, "raster": meta, "geotiff_base64": b64})
-        meta, b64 = _couche_classee(np.where(change, apres, 0).astype(np.uint8), grille, zone, f"Changements {a0}→{a1} {nom}",
-                                    bande="nouvelle_classe", serie=f"evolution {nom}",
+        meta, b64 = _couche_classee(np.where(change, apres, 0).astype(np.uint8), grille, zone, nom_couche("changements", a0, a1, court),
+                                    bande="nouvelle_classe", serie=court,
                                     description=f"Pixels dont la classe a changé entre {a0} et {a1}, colorés selon leur classe en {a1} ; le reste est transparent.")
         out["changements"]["raster"], out["changements"]["geotiff_base64"] = meta, b64
     return reponse(f"Évolution occupation du sol · {nom} · {a0}–{a1} · {len(ok)} années"

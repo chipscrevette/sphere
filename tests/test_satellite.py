@@ -200,3 +200,26 @@ async def test_geocodage_repli_photon(monkeypatch):
 async def test_modis_message_clair(stac):
     r = await appel("occupation_sol", annee=2010, bbox=BBOX, produit="modis")
     assert "esa-cci" in r["erreur"]
+
+
+async def test_echantillons_proposes(stac):
+    r = await appel("composite_satellite", annee=1995, bbox=BBOX, capteur="landsat", geotiff=False, echantillons=True, par_classe=10)
+    e = r["echantillons"]
+    bilan = {b["classe"]: b for b in e["par_classe"]}
+    assert bilan["Eau"]["proposes"] == 10 and bilan["Forêt"]["proposes"] == 10
+    assert bilan["Bâti"]["proposes"] == 0 and bilan["Bâti"]["ecartes_incoherents"] > 0  # « bâti » sur la carte, forêt sur l'image
+    pts = e["geojson"]["features"]
+    assert len(pts) == 20 and all(BBOX[0] <= f["geometry"]["coordinates"][0] <= BBOX[2] for f in pts)
+    assert e["nom"] == "echantillons_1995_zone" and e["reference"].startswith("esa-cci 1995")
+
+
+def test_noms_de_couche():
+    from geosphere_mcp.satellite import nom_couche
+    assert nom_couche("occsol", 1995, "Barrage des Trois-Gorges") == "occsol_1995_barrage_trois_gorges"
+    assert nom_couche("changements", 1995, 2020, "Lac d'Annecy") == "changements_1995_2020_lac_annecy"
+
+
+async def test_noms_avec_lieu(stac):
+    r = await appel("evolution_occupation_sol", annees=[1995, 2005], lieu="Barrage des Trois-Gorges", rayon_km=1.5, couches=True)
+    assert [c["raster"]["nom"] for c in r["couches"]] == ["occsol_1995_barrage_trois_gorges", "occsol_2005_barrage_trois_gorges"]
+    assert r["changements"]["raster"]["nom"] == "changements_1995_2005_barrage_trois_gorges"
