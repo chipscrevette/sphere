@@ -557,18 +557,24 @@ async def _echantillons(zone: list[float], annee: int, comp: np.ndarray, grille:
     await occupation_sol(zone, None, 0, ref_annee, produit, max(w, h), geotiff=False, grille=grille, garder=garde)
     ref = garde["harmo"]
     k = max(1, round(PRODUITS[produit]["res"] / res / 2))  # environ un pixel de la carte de référence autour du point
-    stable = _homogene(ref, k) & np.isfinite(comp).all(axis=0)
+    image_ok = np.isfinite(comp).all(axis=0)
+    # Voisinage exigé de plus en plus petit : les classes en petites plages (bâti, zones humides) ont quand même des points
+    niveaux = [(kk, _homogene(ref, kk) & image_ok) for kk in sorted({k, k // 2, 0}, reverse=True)]
     with np.errstate(all="ignore"):
         ndvi = (comp[3] - comp[0]) / (comp[3] + comp[0])
         mndwi = (comp[1] - comp[4]) / (comp[1] + comp[4])
     rng = np.random.default_rng(annee)
     feats, bilan = [], []
     for code, classe in enumerate(HARMO, 1):
-        cand = stable & (ref == code)
-        n_ref = int(cand.sum())
-        if classe in _COHERENT:
-            cand &= _COHERENT[classe](ndvi, mndwi)
-        lignes, cols = np.nonzero(cand)
+        n_ref, lignes = 0, ()
+        for kk, stable in niveaux:
+            cand = stable & (ref == code)
+            n_ref = max(n_ref, int(cand.sum()))
+            if classe in _COHERENT:
+                cand &= _COHERENT[classe](ndvi, mndwi)
+            lignes, cols = np.nonzero(cand)
+            if len(lignes) >= min(par_classe, 5):
+                break
         if not len(lignes):
             if n_ref:
                 bilan.append({"classe": classe, "proposes": 0, "ecartes_incoherents": n_ref})
@@ -579,7 +585,7 @@ async def _echantillons(zone: list[float], annee: int, comp: np.ndarray, grille:
         for lon, lat in zip(lons, lats):
             feats.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [round(lon, 6), round(lat, 6)]},
                           "properties": {"classe": classe, "code": code}})
-        bilan.append({"classe": classe, "proposes": len(choix)})
+        bilan.append({"classe": classe, "proposes": len(choix), **({} if kk == k else {"plages": "petites, à vérifier en priorité"})})
     if not feats:
         raise SourceError("aucune plage homogène et cohérente trouvée")
     return {"nom": nom, "methode": (f"Points tirés au centre de plages homogènes de la carte {produit} {ref_annee}, gardés seulement "

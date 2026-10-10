@@ -223,3 +223,10 @@ async def test_noms_avec_lieu(stac):
     r = await appel("evolution_occupation_sol", annees=[1995, 2005], lieu="Barrage des Trois-Gorges", rayon_km=1.5, couches=True)
     assert [c["raster"]["nom"] for c in r["couches"]] == ["occsol_1995_barrage_trois_gorges", "occsol_2005_barrage_trois_gorges"]
     assert r["changements"]["raster"]["nom"] == "changements_1995_2005_barrage_trois_gorges"
+
+
+def test_homogene_repli():
+    from geosphere_mcp.satellite import _homogene
+    a = np.ones((30, 30), np.uint8)
+    a[10:12, 10:12] = 5  # petite plage de bâti
+    assert not (_homogene(a, 3) & (a == 5)).any() and (_homogene(a, 0) & (a == 5)).sum() == 4
