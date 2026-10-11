@@ -84,3 +84,51 @@ async def fond(tuiles: list[str], source: str = "auto") -> dict:
     used = sorted({r["source"] for r in ok})
     return {"etape": f"Fond satellite, {len(ok)} tuile{'s' if len(ok) > 1 else ''}", "tuiles": res,
             "ignorees": max(0, len(tuiles) - MAX_TUILES), "source": [SOURCES[s] for s in used]}
+
+
+# ---------- une image par vue (WMS GetMap), comme QGIS : un seul aller-retour au lieu de dizaines de tuiles ----------
+IGN_WMS = "https://data.geopf.fr/wms-r/wms"
+EOX_WMS = "https://tiles.maps.eox.at/wms"
+VUE_MAX = 2048
+O = 20037508.342789244
+_vues: OrderedDict[str, tuple[str, str]] = OrderedDict()
+_VUES_MAX = 300
+
+
+def _lonlat(x: float, y: float) -> tuple[float, float]:
+    return x / O * 180, math.degrees(2 * math.atan(math.exp(y / O * math.pi)) - math.pi / 2)
+
+
+async def vue(bbox: list[float], largeur: int, hauteur: int, source: str = "auto") -> dict:
+    """Image JPEG de l'emprise bbox (EPSG:3857, [xmin, ymin, xmax, ymax]) à la taille demandée."""
+    if len(bbox) != 4 or not (bbox[0] < bbox[2] and bbox[1] < bbox[3]):
+        raise ValueError("bbox attendue : [xmin, ymin, xmax, ymax] en EPSG:3857")
+    if not (16 <= largeur <= VUE_MAX and 16 <= hauteur <= VUE_MAX):
+        raise ValueError(f"taille entre 16 et {VUE_MAX} px")
+    lon, lat = _lonlat((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
+    src = source if source != "auto" else ("ign" if any(a <= lon <= c and b <= lat <= d for a, b, c, d in FRANCE) else "eox")
+    key = f"{src}/{largeur}x{hauteur}/" + ",".join(f"{v:.1f}" for v in bbox)
+    if key in _vues:
+        _vues.move_to_end(key)
+        s, b64 = _vues[key]
+        return {"etape": "Fond satellite (cache)", "jpeg_base64": b64, "bbox": bbox, "largeur": largeur, "hauteur": hauteur, "source": [SOURCES[s]]}
+    b = ",".join(f"{v:.3f}" for v in bbox)
+    if src == "ign":
+        url, params = IGN_WMS, {"SERVICE": "WMS", "VERSION": "1.3.0", "REQUEST": "GetMap", "LAYERS": "ORTHOIMAGERY.ORTHOPHOTOS", "STYLES": "",
+                                "CRS": "EPSG:3857", "BBOX": b, "WIDTH": largeur, "HEIGHT": hauteur, "FORMAT": "image/jpeg"}
+    else:
+        url, params = EOX_WMS, {"SERVICE": "WMS", "VERSION": "1.1.1", "REQUEST": "GetMap", "LAYERS": "s2cloudless_3857", "STYLES": "",
+                                "SRS": "EPSG:3857", "BBOX": b, "WIDTH": largeur, "HEIGHT": hauteur, "FORMAT": "image/jpeg"}
+    try:
+        r = await client().get(url, params=params, headers={"Accept": "image/jpeg,image/*"})
+    except httpx.HTTPError as e:
+        return {"etape": f"Fond satellite, {src} injoignable", "erreur": f"{src} injoignable ({type(e).__name__})"}
+    if r.status_code >= 400 or not r.headers.get("content-type", "").startswith("image/"):
+        if src == "ign" and source == "auto":  # hors couverture de l'ortho : Sentinel-2
+            return await vue(bbox, largeur, hauteur, "eox")
+        return {"etape": f"Fond satellite, échec {src}", "erreur": f"{src} : réponse {r.status_code} {r.text[:160]}"}
+    b64 = base64.b64encode(r.content).decode()
+    _vues[key] = (src, b64)
+    if len(_vues) > _VUES_MAX:
+        _vues.popitem(last=False)
+    return {"etape": "Fond satellite", "jpeg_base64": b64, "bbox": bbox, "largeur": largeur, "hauteur": hauteur, "source": [SOURCES[src]]}

@@ -57,3 +57,19 @@ async def test_cache_et_limites(faux):
 async def test_trou_ign(faux):
     r = await fond.fond(["19/1/1"], "ign")
     assert "erreur" in r["tuiles"][0]
+
+
+@pytest.mark.asyncio
+async def test_vue_wms(faux):
+    fond._vues.clear()
+    lyon = [538000.0, 5740000.0, 540000.0, 5742000.0]
+    r = await fond.vue(lyon, 800, 600)
+    assert r["source"][0]["licence"] == "Licence Ouverte 2.0 (Etalab)" and base64.b64decode(r["jpeg_base64"]) == b"\xff\xd8jpeg"
+    assert "wms-r" in faux[-1] and "CRS=EPSG%3A3857" in faux[-1] and "WIDTH=800" in faux[-1]
+    await fond.vue(lyon, 800, 600)
+    assert len(faux) == 1
+    londres = [-20000.0, 6700000.0, -10000.0, 6710000.0]
+    r = await fond.vue(londres, 400, 400)
+    assert r["source"][0]["licence"] == "CC BY 4.0" and "LAYERS=s2cloudless_3857" in faux[-1]
+    with pytest.raises(ValueError):
+        await fond.vue([1, 2, 0, 3], 100, 100)

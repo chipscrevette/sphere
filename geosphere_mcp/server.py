@@ -29,7 +29,7 @@ Hors de France ou en imagerie : composite_satellite (images sans nuages), occupa
 extraire_raster pour tout autre raster mondial. Leur clé `geotiff_base64` est un raster à charger tel quel ; ne jamais la recopier.
 evolution_occupation_sol renvoie une couche par année (`couches`) et une couche `changements`, superposables pour comparer."""
 
-mcp = MCPServer("geosphere", title="Géosphère · données SIG", instructions=INSTRUCTIONS, version="0.6.0")
+mcp = MCPServer("geosphere", title="Géosphère · données SIG", instructions=INSTRUCTIONS, version="0.7.0")
 
 Lon = Annotated[float, Field(description="Longitude WGS84", ge=-180, le=180)]
 Lat = Annotated[float, Field(description="Latitude WGS84", ge=-90, le=90)]
@@ -297,6 +297,21 @@ async def fond_satellite(
         return {"etape": f"Échec, {e}", "erreur": str(e)}
 
 
+@mcp.tool(structured_output=False)  # une image JPEG par vue, comme un GetMap WMS : pour l'affichage de la page
+async def vue_satellite(
+    bbox: Annotated[list[float], Field(description="Emprise [xmin, ymin, xmax, ymax] en EPSG:3857 (mètres Web Mercator)", min_length=4, max_length=4)],
+    largeur: Annotated[int, Field(description="Largeur de l'image en pixels", ge=16, le=2048)],
+    hauteur: Annotated[int, Field(description="Hauteur de l'image en pixels", ge=16, le=2048)],
+    source: Annotated[Literal["auto", "ign", "eox"], Field(description="auto : orthophoto IGN en France, Sentinel-2 cloudless ailleurs")] = "auto",
+) -> dict:
+    """Fond satellite de la page en une seule image pour toute la vue (clé jpeg_base64).
+    Réservé à l'affichage de la carte ; le modèle n'a pas à l'appeler."""
+    try:
+        return await fnd.vue(bbox, largeur, hauteur, source)
+    except ValueError as e:
+        return {"etape": f"Échec, {e}", "erreur": str(e)}
+
+
 CATALOGUE = {
     "live_sans_cle": {
         "Découpage administratif / COG": "resoudre_territoire",
@@ -314,7 +329,7 @@ CATALOGUE = {
         "Landsat 4-9 (1984+, 30 m) et Sentinel-2 (2017+, 10 m), sans nuages": "composite_satellite",
         "Occupation du sol ESA CCI, MODIS, IO/Esri, ESA WorldCover": "occupation_sol, evolution_occupation_sol",
         "Tout le catalogue Planetary Computer (MNT, climat, population...)": "catalogue_satellite, rechercher_scenes, extraire_raster",
-        "Fond satellite de la carte (ortho IGN, Sentinel-2 cloudless)": "fond_satellite",
+        "Fond satellite de la carte (ortho IGN, Sentinel-2 cloudless)": "vue_satellite, fond_satellite",
     },
     "a_venir": {
         "Carreaux Filosofi 200 m": "ingestion PostGIS (fichiers seulement)",
