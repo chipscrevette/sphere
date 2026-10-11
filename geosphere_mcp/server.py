@@ -16,7 +16,7 @@ from pydantic import Field
 
 from mcp.server.mcpserver import MCPServer
 
-from . import batiments as bati, foncier, ign, reglementaire as regl, satellite as sat, territoire as terr
+from . import batiments as bati, fond as fnd, foncier, ign, reglementaire as regl, satellite as sat, territoire as terr
 from .http import SourceError
 
 INSTRUCTIONS = """Données SIG en direct : France (IGN, INSEE/COG, BAN, cadastre, DVF, BDNB, DPE ADEME, GPU, Géorisques) et monde (satellite, occupation du sol).
@@ -29,7 +29,7 @@ Hors de France ou en imagerie : composite_satellite (images sans nuages), occupa
 extraire_raster pour tout autre raster mondial. Leur clé `geotiff_base64` est un raster à charger tel quel ; ne jamais la recopier.
 evolution_occupation_sol renvoie une couche par année (`couches`) et une couche `changements`, superposables pour comparer."""
 
-mcp = MCPServer("geosphere", title="Géosphère · données SIG", instructions=INSTRUCTIONS, version="0.5.0")
+mcp = MCPServer("geosphere", title="Géosphère · données SIG", instructions=INSTRUCTIONS, version="0.6.0")
 
 Lon = Annotated[float, Field(description="Longitude WGS84", ge=-180, le=180)]
 Lat = Annotated[float, Field(description="Latitude WGS84", ge=-90, le=90)]
@@ -284,6 +284,19 @@ async def extraire_raster(
     return await _sur(sat.extraire(collection, asset, bbox, lieu, rayon_km, debut, fin, taille_max, resolution_native_m))
 
 
+@mcp.tool(structured_output=False)  # tuiles JPEG en base64 : pour l'affichage de la page, pas pour le modèle
+async def fond_satellite(
+    tuiles: Annotated[list[str], Field(description="Tuiles Web Mercator 'z/x/y' (schéma XYZ), 24 au plus par appel", min_length=1, max_length=64)],
+    source: Annotated[Literal["auto", "ign", "eox"], Field(description="auto : orthophoto IGN en France, Sentinel-2 cloudless ailleurs")] = "auto",
+) -> dict:
+    """Fond de carte satellite de la page : renvoie les tuiles demandées en JPEG base64 (clé tuiles[].jpeg_base64).
+    Réservé à l'affichage de la carte ; le modèle n'a pas à l'appeler."""
+    try:
+        return await fnd.fond(tuiles, source)
+    except ValueError as e:
+        return {"etape": f"Échec, {e}", "erreur": str(e)}
+
+
 CATALOGUE = {
     "live_sans_cle": {
         "Découpage administratif / COG": "resoudre_territoire",
@@ -301,6 +314,7 @@ CATALOGUE = {
         "Landsat 4-9 (1984+, 30 m) et Sentinel-2 (2017+, 10 m), sans nuages": "composite_satellite",
         "Occupation du sol ESA CCI, MODIS, IO/Esri, ESA WorldCover": "occupation_sol, evolution_occupation_sol",
         "Tout le catalogue Planetary Computer (MNT, climat, population...)": "catalogue_satellite, rechercher_scenes, extraire_raster",
+        "Fond satellite de la carte (ortho IGN, Sentinel-2 cloudless)": "fond_satellite",
     },
     "a_venir": {
         "Carreaux Filosofi 200 m": "ingestion PostGIS (fichiers seulement)",
